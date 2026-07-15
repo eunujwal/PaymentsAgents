@@ -1,6 +1,6 @@
-# PostHog HogQL queries for `payments-checkout-optimizer`
+# PostHog HogQL queries for `payments-checkout`
 
-Reference queries the agent should call when PostHog is the analytics backend. All queries assume the canonical event contract from `SKILL.md`. If your events are named differently, map them once in a preamble CTE rather than editing each query.
+Reference queries the agent should call. Assume the canonical event contract from `SKILL.md`. If your events are named differently, map them once in a preamble CTE rather than editing each query.
 
 Run these against the HogQL query endpoint:
 ```
@@ -10,7 +10,7 @@ POST /api/projects/:project_id/query
 
 The returned JSON goes into the Finding's `evidence_refs` as the query id.
 
-Timezone note: all timestamps are UTC. Convert to `oracle.markets(market).timezone` before selecting a baseline slot (see `payments-context/SKILL.md` timezone policy).
+Timezone note: all timestamps are UTC. Convert to the market's local timezone before selecting a baseline slot — Saturday night ≠ Monday morning, per market.
 
 ---
 
@@ -96,9 +96,9 @@ HAVING pct_missing_preferred > 0.02
 ORDER BY sessions_missing_preferred DESC
 ```
 
-Cross-check the resulting `market → methods_ever_shown` list against `oracle.markets(market).preferred_methods` to name which method is missing. Then price with the `method_coverage_gap` formula from `payments-context`.
+Cross-check the resulting `market → methods_ever_shown` list against your market config (`preferred_methods` per market) to name which method is missing. Price with the `method_coverage_gap` formula: `market_volume × preference_share × aov × (1 − fallback_rate)`.
 
-If `payments-storefront-audit` is available, ask it to confirm whether the missing method is actually disabled in the storefront config or just never selected. Upgrade `confidence` to `high` on confirmation.
+Then ask `payments-storefront-audit` for the actual Shopify Payments config for the market. If the audit confirms the method is disabled, upgrade `confidence` to `high` and cite the audit's finding id in `evidence_refs`.
 
 ---
 
@@ -121,7 +121,7 @@ HAVING sessions > 200
 ORDER BY device, latency_bucket_ms
 ```
 
-Fit a linear regression client-side. The slope × your GMV = your actual latency cost per +100ms. Do not use the default 1.5% assumption from `payments-context` if this query returns >200 sessions per bucket — use the measured slope.
+Fit a linear regression client-side. The slope × your GMV = your actual latency cost per +100ms. Do not use the default 1.5% industry assumption if this query returns >200 sessions per bucket — use the measured slope.
 
 ---
 
@@ -149,7 +149,7 @@ ORDER BY abandonment_rate DESC
 
 ## 5. False-positive rebuy proxy — cheap fallback for fraud analyst
 
-`payments-fraud-analyst` needs a false-positive rate but the strict definition requires a 7-day rebuy join against your user DB. When that join is missing, this proxy from PostHog session data is the fallback (`confidence: medium`).
+On this Shopify + Stripe stack, `payments-radar-tuner` should use the Shopify customer-history join instead — it has the user database with `customer.orders_count` and `customer.created_at`, which is cheaper and more accurate. This PostHog proxy is only useful if that Shopify join is unavailable — treat as a fallback (`confidence: medium`).
 
 A blocked session is a probable false positive if the same `distinct_id` completed a payment within 7 days on any method.
 
@@ -178,7 +178,7 @@ SELECT
 FROM blocked
 ```
 
-Hand the resulting rate to `payments-fraud-analyst` as the counter metric — this is what enforces the "never report fraud rate without false positive rate" rule when the strict data is missing.
+Hand the resulting rate to `payments-radar-tuner` as the counter metric when the Shopify join is unavailable — enforces the "never report fraud rate without false positive rate" rule.
 
 ---
 

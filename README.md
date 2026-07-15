@@ -1,87 +1,12 @@
-# Payments Agent Ecosystem
+# Payments Agent Ecosystem — Shopify + Stripe
 
-Eleven specialized AI agents that monitor, optimize, and protect a multi-PSP payments platform, one synthesis agent that turns their raw signals into a briefing a human can actually act on, and a shared context layer that keeps every agent's output correlatable.
+Six specialized agents that monitor, tune, and reconcile payments on a Shopify storefront running Stripe (via Shopify Payments or as a direct gateway), plus one synthesis agent that turns their raw signals into a briefing a human can actually act on.
 
-The design goal is the opposite of most monitoring setups: fewer, better findings. Each agent produces structured data. The Synthesis Agent decides what's worth a human's attention, correlates signals across agents, and attaches a dollar figure to everything it surfaces.
+The design goal is the opposite of most monitoring setups: fewer, better findings. Each agent produces structured Findings that share a schema. The Synthesis Agent decides what's worth a human's attention, correlates signals across agents, and attaches a dollar figure to everything it surfaces.
 
-## Prerequisites
-
-Before importing any agent, confirm the following. Missing items don't necessarily block the ecosystem — each agent lists its own data dependencies and degrades gracefully — but they set the ceiling on how much of the value you'll actually get.
-
-### 1. Runtime
-
-- **Claude workspace** with skills support enabled (skills are imported from `packages/*.skill`)
-- **A scheduler** that can trigger agents on their declared cadence — cron, GitHub Actions, Temporal, or the runtime's own scheduler. `payments-synthesis` must run *after* the other agents each cycle
-- **A place for outputs to land.** The reference wiring is Slack (six channels below); any structured sink (Linear, Jira, Notion, email) works if you rewrite the `slack_notification` block
-
-### 2. Payments platform assumptions
-
-The ecosystem is designed for:
-
-- **Multi-PSP setups** (Stripe + Adyen + Braintree, or similar). Single-PSP orgs still get value from checkout, fraud, and reconciliation agents, but cost-optimizer and partner-health assume routing choice exists
-- **Meaningful transaction volume.** Anomaly detection uses >2σ from a 28-day baseline with a >500-session floor per segment. Below ~10K transactions/day per segment, findings will be sparse and low-confidence
-- **A defined market list.** `oracle.markets` needs each active market's timezone, currency, preferred payment methods, and SCA regime. This can be a static JSON file to start
-
-### 3. Data sources by agent
-
-| Agent | Requires | Degrades gracefully without |
-|---|---|---|
-| `payments-context` | Static config: markets, PSP registry. GMV feed (data warehouse or PSP report). Change log source (Git/CI + `payments-storefront-audit`) | GMV oracle missing → dollar impacts marked `manual_estimate` / `confidence: low` |
-| `payments-kpi-monitor` | Read access to PSP transaction data (API or warehouse), APM for latency | Without APM: client-side latency signals unavailable, flag in output |
-| `payments-fraud-analyst` | Fraud model score outputs, chargeback data, user DB (for 7-day rebuy join) | Without user DB: falls back to PostHog rebuy proxy at `confidence: medium` |
-| `payments-cost-optimizer` | PSP fee schedules, transaction data with routing decisions | — |
-| `payments-checkout-optimizer` | Product analytics with the canonical event contract (PostHog reference — see `skills/payments-checkout-optimizer/posthog-queries.md`) | No analytics → PSP-only submit-onward view, agent flags the blindness |
-| `payments-incident-agent` | PSP status page feeds, internal alerting integration | — |
-| `payments-reconciliation` | Bank statement access, PSP settlement reports, internal ledger | — |
-| `payments-partner-health` | PSP contracts (SLAs, renewal dates), historical uptime data | — |
-| `payments-regulatory-monitor` | Regulatory feed (subscription or scraped) covering active markets | — |
-| `payments-security-audit` | Infra read access, webhook endpoint list | — |
-| `payments-storefront-audit` | **Shopify merchant** with CLI ≥3.x authenticated (`shopify auth login`); admin API scopes: `read_payment_terms`, `read_shopify_payments_accounts`, `read_apps`, `read_themes`, `read_checkouts` | Not a Shopify merchant → skip this agent; Synthesis's `checkout_config_changed` correlation is dead but nothing else breaks |
-| `payments-synthesis` | Read access to the structured outputs of the other agents | Runs against however many agents are wired — output quality scales with input coverage |
-
-### 4. Credentials & access
-
-You'll need, minimum:
-
-- **PSP API keys** (restricted, read-only) for each active PSP
-- **Product analytics access** — PostHog project + personal API key for HogQL queries, or equivalent Amplitude/Mixpanel key
-- **Shopify CLI auth** and the admin scopes above (only if using `payments-storefront-audit`)
-- **Slack** — bot token with `chat:write` on the six briefing channels, or incoming webhook URLs
-- **APM** — Datadog/Grafana read token if you want latency signals from beyond the PSP boundary
-
-Store these in your runtime's secret manager. No agent reads secrets from disk; they're passed at invocation time.
-
-### 5. First-run checklist
-
-Before your first scheduled cycle:
-
-1. Populate `oracle.markets` for every active market (timezone, currency, preferred methods)
-2. Populate `oracle.psps` with your live PSP registry, SLA days, renewal dates
-3. Point `oracle.gmv` at your revenue source (warehouse view, PSP report aggregation, or manual CSV to start)
-4. Wire `oracle.changes` to at least one change source (Git deploy log, feature-flag audit log, or `payments-storefront-audit` output). Without this, the "success rate drop + recent change" correlation cannot fire
-5. Create the six Slack channels listed below
-6. Run `payments-context` self-check to confirm every downstream agent's Finding output validates against the schema
-
-### 6. Not the right fit if…
-
-- You're on a single PSP with no plan to route (much of the ecosystem is redundant)
-- You have <1K transactions/day (thresholds won't have enough signal to fire cleanly)
-- Your compliance context prohibits sending briefings to Slack/external chat, and you don't have a replacement sink
-- You want the agents to *take* actions (they don't — they surface findings for humans to act on)
-
-## Quick start
-
-> **Note on runtime:** These agents are packaged as Claude skills. Each lives as a `SKILL.md` (readable source in `skills/`) and a bundled `.skill` file (`packages/`) you can import directly. Confirm the two lines below match your setup before publishing.
-
-1. **Import an agent.** Grab any `.skill` file from `packages/` and import it into your Claude workspace as a skill.
-2. **Wire the schedule.** The cadence column in the Agents table (hourly, daily, weekly) is the intended trigger. Point your scheduler at each agent accordingly. The `payments-synthesis` agent should run *after* the others so it has fresh outputs to read.
-3. **Connect the outputs.** Agents write findings that the Synthesis Agent reads. Route the final briefings to the Slack channels in the table below.
-
-Want to understand the system before running it? Read `payments_agents_handbook.pdf` for the full reference, or browse `skills/` for any individual agent's logic in plain markdown.
+This is a deliberately narrow build. If you're on multi-PSP or non-Shopify infrastructure, see [Not the right fit if…](#not-the-right-fit-if-) below.
 
 ## Architecture
-
-The agents are organized in four layers, and signal flows upward. Detection agents watch continuously, optimization and compliance agents run on cadence, and everything funnels into a single synthesis step.
 
 ```
                     ┌─────────────────────┐
@@ -93,136 +18,215 @@ The agents are organized in four layers, and signal flows upward. Detection agen
         ┌──────────────────────┼──────────────────────┐
         │                      │                      │
 ┌───────┴────────┐   ┌─────────┴────────┐   ┌─────────┴────────┐
-│  Real-Time     │   │  Optimization    │   │  Compliance &    │
-│  Detection     │   │  & Analysis      │   │  Relationships   │
+│  Detection     │   │  Optimization    │   │  Verification    │
 │                │   │                  │   │                  │
-│  Incident      │   │  Cost Optimizer  │   │  Reconciliation  │
-│  KPI Monitor   │   │  Checkout Opt.   │   │  Partner Health  │
-│  Fraud Analyst │   │  Security Audit  │   │  Regulatory Mon. │
-│                │   │  Storefront Audit│   │                  │
-└────────────────┘   └──────────────────┘   └─────────┬────────┘
-        ▲                      ▲                      ▲
-        └──────────────────────┴──────────────────────┘
-                               │
-                    ┌──────────┴──────────┐
-                    │  payments-context   │   foundation layer
-                    │  schema + oracles   │   shared vocabulary
-                    └─────────────────────┘
+│  Health        │   │  Checkout        │   │  Reconciliation  │
+│  Radar Tuner   │   │  Storefront Audit│   │                  │
+└────────────────┘   └──────────────────┘   └──────────────────┘
 ```
 
 | Layer | Agents | Purpose |
 | --- | --- | --- |
-| **Foundation** | `payments-context` | Shared Finding schema, signal taxonomy, dollar-impact contract, market/PSP/GMV/change oracles |
-| **Real-Time Detection** | Incident Agent, KPI Monitor, Fraud Analyst | Continuous monitoring, outage detection, fraud calibration |
-| **Optimization & Analysis** | Cost Optimizer, Checkout Optimizer, Security Audit, Storefront Audit | Routing efficiency, pre-submit funnel, security posture, merchant-config drift |
-| **Compliance & Relationships** | Reconciliation, Partner Health, Regulatory Monitor | Settlement verification, vendor SLAs, regulatory compliance |
-| **Synthesis** | Synthesis Agent | Correlates signals across agents, produces daily/weekly briefings |
+| **Detection** | Health, Radar Tuner | Anomaly detection, incident triage, Stripe Radar calibration |
+| **Optimization** | Checkout, Storefront Audit | Pre-submit funnel (PostHog), merchant-side config drift (Shopify CLI) |
+| **Verification** | Reconciliation | Stripe payout ↔ Shopify order ↔ bank ↔ ledger |
+| **Synthesis** | Synthesis | Correlates the five specialist outputs, produces daily/weekly briefings |
 
 ## Agents
 
 | Agent | Schedule | What it does |
 | --- | --- | --- |
-| `payments-context` | Referenced by every run | Foundation — Finding schema, canonical signal names, shared oracles; not an agent you schedule |
-| `payments-incident-agent` | Always on | Detects outages, triages before alerting, suggests routing shifts |
-| `payments-kpi-monitor` | Hourly | Tracks success rate, auth rate, latency, uptime across all PSPs |
-| `payments-fraud-analyst` | Hourly + triggered | Balances fraud rate vs false positives, detects model drift |
-| `payments-cost-optimizer` | Daily | Finds routing inefficiencies, token gaps, method mix savings |
-| `payments-checkout-optimizer` | Daily | Owns the pre-submit funnel PSP data can't see (PostHog-native — see `skills/payments-checkout-optimizer/posthog-queries.md`) |
-| `payments-storefront-audit` | Weekly + pre-market-launch | Audits Shopify checkout config, apps, extensibility functions, webhooks, and theme diffs via Shopify CLI; emits change signals for Synthesis |
-| `payments-security-audit` | Weekly + on integration | PCI DSS scope, OWASP checks, webhook validation |
-| `payments-reconciliation` | Daily/weekly/monthly | Verifies every settled transaction matches ledger and bank |
-| `payments-partner-health` | Weekly + before renewals | SLA tracking, contract milestones, negotiation readiness |
-| `payments-regulatory-monitor` | Weekly scans | SCA/PSD2, AML, card scheme mandates, market licensing |
-| `payments-synthesis` | Daily 08:00 + weekly Monday | Reads all agent outputs, produces briefings (max 5 findings/day) |
+| `payments-health` | Hourly + real-time | Anomaly detection and incident triage. Merges classic KPI monitoring and incident response into one agent — no routing decisions to make on a single-processor stack |
+| `payments-radar-tuner` | Hourly + triggered | Tunes Stripe Radar. Balances fraud rate against false-positive rate (uses Shopify customer history for the cheap FP proxy). Recommends exact Radar rule changes |
+| `payments-checkout` | Daily | Owns the pre-submit funnel Stripe can't see. PostHog-native — queries in `skills/payments-checkout/posthog-queries.md`. Shop Pay tracked as a first-class method |
+| `payments-storefront-audit` | Weekly + pre-market-launch | Shopify CLI audit of checkout config, extensibility functions, installed apps, webhook subscriptions, and theme diffs. Emits change signals for Synthesis |
+| `payments-reconciliation` | Daily/weekly/monthly | Three-hop join: Stripe Payout → BalanceTransaction → Charge → Shopify Order → internal ledger |
+| `payments-synthesis` | Daily 08:00 + weekly Monday | Reads all five specialist outputs, produces briefings (max 5 findings/day) |
+
+## Prerequisites
+
+Before importing any agent, confirm the following.
+
+### 1. Runtime
+- **Claude workspace** with skills support
+- **A scheduler** — cron, GitHub Actions, Temporal, or the runtime's own scheduler. `payments-synthesis` must run *after* the others each cycle
+- **Slack** (or another structured sink) for the six channels below
+
+### 2. Stack assumptions
+- **Shopify storefront** — classic theme or Hydrogen. Some agents (storefront-audit, checkout) rely on the Shopify Admin API and CLI
+- **Stripe as the processor** — via Shopify Payments (Stripe under the hood) or as a direct third-party gateway. This ecosystem is designed around one processor; multi-PSP is out of scope
+- **Meaningful volume** — anomaly thresholds assume >500 sessions per segment. Below ~10K transactions/day, findings will be sparse
+
+### 3. Data sources & credentials
+
+| Need | For which agents | Notes |
+| --- | --- | --- |
+| **Stripe API key** (restricted, read-only) | health, radar-tuner, reconciliation | Scopes: `charges`, `payment_intents`, `payouts`, `balance_transactions`, `disputes`, `radar.rules`, `radar.reviews`, `radar.value_lists` |
+| **Stripe Sigma or Data Pipeline** | health (dollar impact), reconciliation (fee audit) | Warehouse view acceptable; needed for GMV baselines |
+| **Shopify Admin API token** | radar-tuner (customer join), reconciliation (order match), storefront-audit | Scopes: `read_orders`, `read_customers`, `read_payment_terms`, `read_shopify_payments_accounts`, `read_apps`, `read_themes`, `read_checkouts` |
+| **Shopify CLI ≥3.x** authenticated | storefront-audit | `shopify auth login`; store connected via `shopify app config link` |
+| **PostHog project + personal API key** | checkout (HogQL queries), synthesis (posts annotations) | Canonical event contract in `skills/payments-checkout/SKILL.md` |
+| **Bank statement access** (CSV export or API) | reconciliation | Required for the bank-hop verification |
+| **Stripe rate card** (static config is fine) | reconciliation | For fee variance detection |
+| **Slack bot token** or webhook URLs | synthesis, all agents that notify | `chat:write` on the six channels |
+
+Store all secrets in your runtime's secret manager. No agent reads secrets from disk.
+
+### 4. First-run checklist
+1. Populate a static `markets.json` for every active market: `{ code, timezone, currency, preferred_methods, sca_regime, launch_date }`
+2. Wire Stripe Sigma (or warehouse mirror) so `payments-health` can compute dollar impact
+3. Confirm `charge.metadata.shopify_order_id` is populated on every Stripe charge — this is the join key `payments-reconciliation` depends on. If it's missing, fix that first; every downstream reconciliation finding will be `medium` confidence otherwise
+4. Ensure PostHog is emitting the canonical event contract (see `skills/payments-checkout/SKILL.md`); map non-canonical event names via a CTE if needed
+5. Create the six Slack channels below
+6. Run each specialist agent once manually to confirm it produces valid Findings before enabling the schedule
+7. Run `payments-synthesis` last — verify it can read all five inputs
+
+### 5. Not the right fit if…
+- You're on multi-PSP routing (this build has no routing logic — see git history for the multi-PSP version)
+- You're not on Shopify (storefront-audit and much of checkout will not apply)
+- You have <1K transactions/day (thresholds won't have signal to fire cleanly)
+- You want the agents to *take* actions (they don't — they surface findings for humans to act on; Radar rule application, checkout config toggles, etc. are human-approved)
 
 ## Key design principles
 
-- **Agents produce structured data, they don't make decisions for other agents.** The Incident Agent recommends a routing shift; the Cost Optimizer validates capacity.
-- **Every finding needs a dollar figure.** Qualitative observations without numbers don't get surfaced.
-- **The Synthesis Agent is editorial, not a forwarder.** An auth rate drop + fraud model change + 3DS spike is one story, not three alerts.
-- **Always report paired metrics.** Fraud rate without false positive rate is meaningless. Success rate without segmentation is not actionable.
+- **Agents produce structured Findings, they don't make decisions for other agents.** Health flags an anomaly; Radar Tuner decides whether to loosen a rule; a human applies it.
+- **Every finding needs a dollar figure.** Qualitative observations without numbers don't get surfaced. Dollar impact comes from Stripe Sigma, not private estimates.
+- **The Synthesis Agent is editorial, not a forwarder.** An auth-rate drop + Radar tightening + 3DS spike is one story, not three alerts.
+- **Always report paired metrics.** Fraud rate without false-positive rate is meaningless. Success rate without segmentation is not actionable. Every Finding carries both a `primary` and a `counter` metric.
+
+## The Finding schema
+
+Every specialist agent emits an array of Findings conforming to this shape. The Synthesis Agent discards anything non-conforming.
+
+```json
+{
+  "agent": "<agent name, e.g. payments-health>",
+  "finding_id": "<stable hash of {agent, signals[], segment, window.start} — same underlying issue produces the same id across runs>",
+  "emitted_at": "<ISO 8601>",
+  "window": {
+    "start": "<ISO 8601>",
+    "end":   "<ISO 8601>",
+    "market_timezone": "<IANA tz>"
+  },
+  "signals": ["<canonical signal names from the taxonomy below>"],
+  "segment": {
+    "market":        "<ISO 3166-1 alpha-2 or 'global'>",
+    "method":        "<card | shop_pay | apple_pay | google_pay | klarna | ... | 'all'>",
+    "device":        "mobile | desktop | all",
+    "card_brand":    "<visa | mc | amex | ... | 'all'>",
+    "sales_channel": "<online_store | pos | shop_app | 'all'>"
+  },
+  "metric_paired": {
+    "primary": { "name": "<metric>", "value": <n>, "unit": "<unit>", "baseline": <n>, "delta_pct": <signed n> },
+    "counter": { "name": "<counter>", "value": <n>, "unit": "<unit>", "baseline": <n>, "delta_pct": <signed n> }
+  },
+  "dollar_impact": {
+    "amount_usd": <number>,
+    "basis":      "per_hour | per_day | per_month | one_time",
+    "method":     "stripe_sigma | raw_variance | manual_estimate",
+    "confidence": "high | medium | low"
+  },
+  "severity":   "P0 | P1 | P2 | P3 | opportunity | info",
+  "confidence": <0.0 - 1.0>,
+  "hypothesis":         "<one sentence — what likely caused this>",
+  "recommended_action": "<one specific next step>",
+  "action_owner":       "payments_eng | fraud_team | head_of_payments | merchant_admin | product",
+  "evidence_refs":      ["<dashboard URL, query id, event id, or log line>"],
+  "carry_over_of":      "<finding_id of a previous finding if this is the same issue, else null>"
+}
+```
+
+### Signal taxonomy
+
+Use only these canonical names in the `signals[]` array — the correlation table below is keyed on them.
+
+**Metric signals** — `success_rate_drop`, `success_rate_recovery`, `auth_rate_drop`, `auth_rate_recovery`, `latency_p99_spike`, `latency_p95_spike`, `uptime_breach`, `fraud_rate_up`, `fraud_rate_down`, `false_positive_rate_up`, `false_positive_rate_down`, `chargeback_rate_up`, `dispute_win_rate_down`, `3ds_challenge_rate_up`, `3ds_abandonment_up`, `checkout_abandonment_up`, `method_coverage_gap`, `settlement_lag`, `recon_variance_up`
+
+**Change signals** — `stripe_status_degraded`, `shopify_status_degraded`, `recent_deploy`, `checkout_config_changed`, `checkout_extension_deployed`, `payment_app_installed`, `payment_app_removed`, `webhook_endpoint_changed`, `checkout_theme_changed`
+
+Do not emit unnamed signals. Add new ones via PR to this README.
+
+### Suppression rules
+
+Applied by Synthesis based on `finding_id` history:
+
+| Age | Ack'd? | Action |
+|---|---|---|
+| Day 1 | — | Surface at declared severity |
+| Day 2 | No | Surface with "still open" tag |
+| Day 3 | No | Downgrade one severity level |
+| Day 5 | No | Auto-mute, move to weekly summary only |
+| Any | Yes | Respect ack — suppress until unsnoozed or a >2σ shift breaks it |
 
 ## Cross-agent correlation patterns
 
-The Synthesis Agent checks for these before treating any output independently. This is where the ecosystem earns its keep, a single degraded number from one agent is noise; the same number next to a second agent's signal is a story.
+The Synthesis Agent checks for these before treating any output independently.
 
 | Signal pattern | What it means |
 | --- | --- |
-| Auth rate down + fraud rate down + FP up | Fraud model tightened too aggressively |
-| Auth rate drop on PSP A only + PSP A status degraded | PSP incident, route around it |
-| Success rate drop + recent deploy | Engineering incident, not payments-specific |
-| Success rate drop + checkout_config_changed | Merchant-side config drift, not engineering |
-| Success rate drop + checkout_extension_deployed | Payment customization function is the likely cause |
-| Checkout abandonment up + 3DS challenge rate up | 3DS overtriggering is killing conversion |
-| Method coverage gap (analytics) + checkout_config_changed (CLI) | Confirmed method disable — promote finding to high confidence |
-| Fraud rate up + payment_app_installed (fraud category) | New fraud tool recalibrating, not model drift |
-| Recon variance up + webhook_endpoint_changed | Payout webhook regression, not partner issue |
-| Cost per txn up + method mix shifting to cards | Mix shift problem, not fee negotiation |
-| Recon variance up + PSP settlement delays | PSP payout issue, escalate to partner health |
+| `auth_rate_drop` + `fraud_rate_down` + `false_positive_rate_up` | Radar tightened too aggressively — one story |
+| `success_rate_drop` + `checkout_extension_deployed` (recent) | Payment customization function is the likely cause — roll back |
+| `success_rate_drop` + `checkout_config_changed` (recent) | Merchant-side config drift, not an engineering incident |
+| `method_coverage_gap` (checkout) + `checkout_config_changed` (audit) same market/method | Confirmed gap — promote to high confidence |
+| `checkout_abandonment_up` + `3ds_challenge_rate_up` | 3DS is overtriggering; loosen Radar challenge rules |
+| `false_positive_rate_up` + `payment_app_installed` (fraud category) | New fraud app recalibrating, not model drift — give it a week |
+| `recon_variance_up` + `webhook_endpoint_changed` | Payout webhook regression, not a Stripe payout issue |
+| `settlement_lag` + `recon_variance_up` | Stripe payout issue — one finding, not two |
+| Shop Pay submit rate falls below card submit rate | Red flag — usually a Shop Pay UI regression from a Checkout Extensibility change |
 
 ## Example: a synthesized briefing
 
-This is what the system produces at 08:00. Notice that six raw agent signals collapse into **two** findings, each with paired metrics and a dollar impact. Everything else got filtered as noise.
+This is what the system produces at 08:00. Notice how five raw signals collapse into **two** findings, each with paired metrics and a dollar impact.
 
 ---
 
 **Payments Daily Briefing — Tue, 14 Jul**
-*Synthesis Agent · 2 findings · signals reviewed: 47 · surfaced: 2*
+*Synthesis Agent · 2 findings · signals reviewed: 23 · surfaced: 2*
 
-**1. Fraud model overcorrected overnight — costing ~$28K/day in declined good orders**
-*Sources: Fraud Analyst, KPI Monitor, Checkout Optimizer*
+**1. Radar tightened overnight — costing ~$28K/day in declined good orders**
+*Sources: Radar Tuner, Health, Checkout*
 
-The fraud model retrained at 02:00 and tightened harder than intended. Three signals line up:
+A Radar rule change deployed at 02:00 tightened NL card transactions harder than intended. Three signals line up:
 
-- Auth rate down 1.4pts (94.1% → 92.7%)
+- Auth rate down 1.4pts in NL (94.1% → 92.7%)
 - Fraud rate down 0.09pts (good) **but** false positive rate up 2.1pts
-- 3DS challenge rate up 6pts, checkout abandonment on challenged sessions up 4pts
+- 3DS challenge rate up 6pts, 3DS abandonment up 4pts on challenged sessions
 
-This is the classic *tightened-too-aggressively* pattern. Blocked-good-order volume maps to roughly **$28K/day** in lost authorized revenue, against ~$3K/day of incremental fraud prevented. Net negative.
+Classic tightened-too-aggressively pattern. Blocked-good-order volume ≈ **$28K/day** against ~$3K/day of incremental fraud prevented. Net negative.
 
-**Recommendation:** Roll back to the pre-02:00 threshold, or relax the challenge trigger on the two segments driving the FP spike (returning customers, sub-$150 orders). Fraud Analyst has the segment breakdown ready.
+**Recommendation:** Fraud team to relax rule_XYZ from `:risk_level: = 'elevated'` to `:risk_level: = 'highest'` for NL. Estimated 340 blocks/day flip to allow. Radar Tuner has the exact rule string ready.
 
-**2. PSP-B settlement lag is creating a $410K reconciliation gap**
-*Sources: Reconciliation, Partner Health*
+**2. Payout missing — $41K unreconciled from 2026-07-13**
+*Sources: Reconciliation*
 
-Recon variance jumped to $410K over the last 48 hours, isolated entirely to PSP-B. Cross-referenced against Partner Health: PSP-B payout timing slipped from T+1 to T+3 starting Sunday. The transactions are authorized and captured, the money just hasn't landed.
+Stripe reports payout `po_1PabcXYZ` (=$41,200) as paid on 2026-07-13, but nothing landed in the bank account by end-of-day. Not a fee variance — the entire payout is missing. Most likely SWIFT/ACH failure at the receiving bank.
 
-This isn't a ledger error, it's a partner SLA breach. PSP-B's contract specifies T+1 settlement, and they're up for renewal in November.
+**Recommendation:** Head of payments to contact bank operations for ACH receipt confirmation and open a Stripe support ticket referencing `po_1PabcXYZ`. Hold finance close for this period.
 
-**Recommendation:** No engineering action needed. Partner Health is escalating to the PSP-B account team today and logging the breach for the renewal negotiation. Reconciliation will confirm the gap closes once payouts catch up.
-
-*Filtered as noise: minor latency blip on PSP-C (self-resolved), expected weekly security scan (clean), routine regulatory digest (no new mandates).*
+*Filtered as noise: minor latency blip on Shopify checkout (self-resolved), routine storefront audit (clean), weekly Shop Pay share up 2pts (positive drift, no action).*
 
 ---
 
 ## Repo structure
 
 ```
-skills/                                    # Extracted SKILL.md files (readable markdown)
-  payments-context/                        # Foundation — schema, signal taxonomy, oracles
-  payments-incident-agent/
-  payments-kpi-monitor/
-  payments-fraud-analyst/
-  payments-cost-optimizer/
-  payments-checkout-optimizer/
+skills/
+  payments-health/                          # KPI + incident, single-processor context
     SKILL.md
-    posthog-queries.md                     # Ready-to-run HogQL for funnel, coverage, 3DS, mix-shift
-  payments-storefront-audit/               # Shopify CLI-driven merchant-config audit
-  payments-security-audit/
-  payments-reconciliation/
-  payments-partner-health/
-  payments-regulatory-monitor/
-  payments-synthesis/
-packages/                                  # Original .skill zip files (importable)
-payments_agents_handbook.pdf               # Comprehensive PDF reference
+  payments-radar-tuner/                     # Stripe Radar tuning + Shopify FP proxy
+    SKILL.md
+  payments-checkout/                        # Pre-submit funnel, PostHog-backed
+    SKILL.md
+    posthog-queries.md                      # Ready-to-run HogQL
+  payments-storefront-audit/                # Shopify CLI merchant-config drift
+    SKILL.md
+  payments-reconciliation/                  # Stripe ↔ Shopify ↔ bank ↔ ledger
+    SKILL.md
+  payments-synthesis/                       # Daily/weekly briefing
+    SKILL.md
 ```
 
-## Analytics and storefront backends
-
-The ecosystem is analytics-backend-agnostic, but two integrations are documented end-to-end:
-
-- **PostHog** is the reference product-analytics backend for `payments-checkout-optimizer` and the false-positive proxy for `payments-fraud-analyst`. HogQL queries and PostHog Alert wiring live in `skills/payments-checkout-optimizer/posthog-queries.md`. `payments-synthesis` posts each briefing back to PostHog as an annotation so the conversion chart carries a timeline of "what we said" next to "what happened."
-- **Shopify CLI** powers `payments-storefront-audit`. It converts silent merchant-side config changes (method toggles, extensibility function deploys, app installs, webhook edits) into `checkout_config_changed` / `checkout_extension_deployed` / `payment_app_installed` / `webhook_endpoint_changed` signals — the storefront equivalent of an engineering deploy log, without which Synthesis's "success rate drop + recent change" correlation is one-eyed.
+Packages (`.skill` bundles) are not shipped — rebuild locally with the Anthropic skill packager once you've customized the SKILL.md files for your workspace.
 
 ## Slack channels
 
@@ -231,11 +235,10 @@ Example routing. Findings from the Synthesis Agent land here based on severity a
 | Channel | Purpose |
 | --- | --- |
 | `#payments-incidents` | P0 critical outages with @here |
-| `#payments-alerts` | P1-P2 alerts, security findings, fraud spikes |
+| `#payments-alerts` | P1-P2 alerts, radar findings, reconciliation issues |
 | `#payments-briefing` | Daily synthesized briefing at 08:00 |
 | `#payments-leadership` | Weekly Monday executive summary |
-| `#payments-optimisation` | Cost and checkout opportunities |
-| `#payments-compliance` | Regulatory alerts |
+| `#payments-optimisation` | Checkout conversion and Shop Pay opportunities |
 
 ## License
 
