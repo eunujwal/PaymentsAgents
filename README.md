@@ -4,6 +4,71 @@ Eleven specialized AI agents that monitor, optimize, and protect a multi-PSP pay
 
 The design goal is the opposite of most monitoring setups: fewer, better findings. Each agent produces structured data. The Synthesis Agent decides what's worth a human's attention, correlates signals across agents, and attaches a dollar figure to everything it surfaces.
 
+## Prerequisites
+
+Before importing any agent, confirm the following. Missing items don't necessarily block the ecosystem — each agent lists its own data dependencies and degrades gracefully — but they set the ceiling on how much of the value you'll actually get.
+
+### 1. Runtime
+
+- **Claude workspace** with skills support enabled (skills are imported from `packages/*.skill`)
+- **A scheduler** that can trigger agents on their declared cadence — cron, GitHub Actions, Temporal, or the runtime's own scheduler. `payments-synthesis` must run *after* the other agents each cycle
+- **A place for outputs to land.** The reference wiring is Slack (six channels below); any structured sink (Linear, Jira, Notion, email) works if you rewrite the `slack_notification` block
+
+### 2. Payments platform assumptions
+
+The ecosystem is designed for:
+
+- **Multi-PSP setups** (Stripe + Adyen + Braintree, or similar). Single-PSP orgs still get value from checkout, fraud, and reconciliation agents, but cost-optimizer and partner-health assume routing choice exists
+- **Meaningful transaction volume.** Anomaly detection uses >2σ from a 28-day baseline with a >500-session floor per segment. Below ~10K transactions/day per segment, findings will be sparse and low-confidence
+- **A defined market list.** `oracle.markets` needs each active market's timezone, currency, preferred payment methods, and SCA regime. This can be a static JSON file to start
+
+### 3. Data sources by agent
+
+| Agent | Requires | Degrades gracefully without |
+|---|---|---|
+| `payments-context` | Static config: markets, PSP registry. GMV feed (data warehouse or PSP report). Change log source (Git/CI + `payments-storefront-audit`) | GMV oracle missing → dollar impacts marked `manual_estimate` / `confidence: low` |
+| `payments-kpi-monitor` | Read access to PSP transaction data (API or warehouse), APM for latency | Without APM: client-side latency signals unavailable, flag in output |
+| `payments-fraud-analyst` | Fraud model score outputs, chargeback data, user DB (for 7-day rebuy join) | Without user DB: falls back to PostHog rebuy proxy at `confidence: medium` |
+| `payments-cost-optimizer` | PSP fee schedules, transaction data with routing decisions | — |
+| `payments-checkout-optimizer` | Product analytics with the canonical event contract (PostHog reference — see `skills/payments-checkout-optimizer/posthog-queries.md`) | No analytics → PSP-only submit-onward view, agent flags the blindness |
+| `payments-incident-agent` | PSP status page feeds, internal alerting integration | — |
+| `payments-reconciliation` | Bank statement access, PSP settlement reports, internal ledger | — |
+| `payments-partner-health` | PSP contracts (SLAs, renewal dates), historical uptime data | — |
+| `payments-regulatory-monitor` | Regulatory feed (subscription or scraped) covering active markets | — |
+| `payments-security-audit` | Infra read access, webhook endpoint list | — |
+| `payments-storefront-audit` | **Shopify merchant** with CLI ≥3.x authenticated (`shopify auth login`); admin API scopes: `read_payment_terms`, `read_shopify_payments_accounts`, `read_apps`, `read_themes`, `read_checkouts` | Not a Shopify merchant → skip this agent; Synthesis's `checkout_config_changed` correlation is dead but nothing else breaks |
+| `payments-synthesis` | Read access to the structured outputs of the other agents | Runs against however many agents are wired — output quality scales with input coverage |
+
+### 4. Credentials & access
+
+You'll need, minimum:
+
+- **PSP API keys** (restricted, read-only) for each active PSP
+- **Product analytics access** — PostHog project + personal API key for HogQL queries, or equivalent Amplitude/Mixpanel key
+- **Shopify CLI auth** and the admin scopes above (only if using `payments-storefront-audit`)
+- **Slack** — bot token with `chat:write` on the six briefing channels, or incoming webhook URLs
+- **APM** — Datadog/Grafana read token if you want latency signals from beyond the PSP boundary
+
+Store these in your runtime's secret manager. No agent reads secrets from disk; they're passed at invocation time.
+
+### 5. First-run checklist
+
+Before your first scheduled cycle:
+
+1. Populate `oracle.markets` for every active market (timezone, currency, preferred methods)
+2. Populate `oracle.psps` with your live PSP registry, SLA days, renewal dates
+3. Point `oracle.gmv` at your revenue source (warehouse view, PSP report aggregation, or manual CSV to start)
+4. Wire `oracle.changes` to at least one change source (Git deploy log, feature-flag audit log, or `payments-storefront-audit` output). Without this, the "success rate drop + recent change" correlation cannot fire
+5. Create the six Slack channels listed below
+6. Run `payments-context` self-check to confirm every downstream agent's Finding output validates against the schema
+
+### 6. Not the right fit if…
+
+- You're on a single PSP with no plan to route (much of the ecosystem is redundant)
+- You have <1K transactions/day (thresholds won't have enough signal to fire cleanly)
+- Your compliance context prohibits sending briefings to Slack/external chat, and you don't have a replacement sink
+- You want the agents to *take* actions (they don't — they surface findings for humans to act on)
+
 ## Quick start
 
 > **Note on runtime:** These agents are packaged as Claude skills. Each lives as a `SKILL.md` (readable source in `skills/`) and a bundled `.skill` file (`packages/`) you can import directly. Confirm the two lines below match your setup before publishing.
