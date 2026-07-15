@@ -1,6 +1,6 @@
 # Payments Agent Ecosystem
 
-Ten specialized AI agents that monitor, optimize, and protect a multi-PSP payments platform, and one synthesis agent that turns their raw signals into a briefing a human can actually act on.
+Eleven specialized AI agents that monitor, optimize, and protect a multi-PSP payments platform, one synthesis agent that turns their raw signals into a briefing a human can actually act on, and a shared context layer that keeps every agent's output correlatable.
 
 The design goal is the opposite of most monitoring setups: fewer, better findings. Each agent produces structured data. The Synthesis Agent decides what's worth a human's attention, correlates signals across agents, and attaches a dollar figure to everything it surfaces.
 
@@ -34,13 +34,22 @@ The agents are organized in four layers, and signal flows upward. Detection agen
 │  Incident      │   │  Cost Optimizer  │   │  Reconciliation  │
 │  KPI Monitor   │   │  Checkout Opt.   │   │  Partner Health  │
 │  Fraud Analyst │   │  Security Audit  │   │  Regulatory Mon. │
-└────────────────┘   └──────────────────┘   └──────────────────┘
+│                │   │  Storefront Audit│   │                  │
+└────────────────┘   └──────────────────┘   └─────────┬────────┘
+        ▲                      ▲                      ▲
+        └──────────────────────┴──────────────────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    │  payments-context   │   foundation layer
+                    │  schema + oracles   │   shared vocabulary
+                    └─────────────────────┘
 ```
 
 | Layer | Agents | Purpose |
 | --- | --- | --- |
+| **Foundation** | `payments-context` | Shared Finding schema, signal taxonomy, dollar-impact contract, market/PSP/GMV/change oracles |
 | **Real-Time Detection** | Incident Agent, KPI Monitor, Fraud Analyst | Continuous monitoring, outage detection, fraud calibration |
-| **Optimization & Analysis** | Cost Optimizer, Checkout Optimizer, Security Audit | Routing efficiency, pre-submit funnel, security posture |
+| **Optimization & Analysis** | Cost Optimizer, Checkout Optimizer, Security Audit, Storefront Audit | Routing efficiency, pre-submit funnel, security posture, merchant-config drift |
 | **Compliance & Relationships** | Reconciliation, Partner Health, Regulatory Monitor | Settlement verification, vendor SLAs, regulatory compliance |
 | **Synthesis** | Synthesis Agent | Correlates signals across agents, produces daily/weekly briefings |
 
@@ -48,11 +57,13 @@ The agents are organized in four layers, and signal flows upward. Detection agen
 
 | Agent | Schedule | What it does |
 | --- | --- | --- |
+| `payments-context` | Referenced by every run | Foundation — Finding schema, canonical signal names, shared oracles; not an agent you schedule |
 | `payments-incident-agent` | Always on | Detects outages, triages before alerting, suggests routing shifts |
 | `payments-kpi-monitor` | Hourly | Tracks success rate, auth rate, latency, uptime across all PSPs |
 | `payments-fraud-analyst` | Hourly + triggered | Balances fraud rate vs false positives, detects model drift |
 | `payments-cost-optimizer` | Daily | Finds routing inefficiencies, token gaps, method mix savings |
-| `payments-checkout-optimizer` | Daily | Owns the pre-submit funnel PSP data can't see |
+| `payments-checkout-optimizer` | Daily | Owns the pre-submit funnel PSP data can't see (PostHog-native — see `skills/payments-checkout-optimizer/posthog-queries.md`) |
+| `payments-storefront-audit` | Weekly + pre-market-launch | Audits Shopify checkout config, apps, extensibility functions, webhooks, and theme diffs via Shopify CLI; emits change signals for Synthesis |
 | `payments-security-audit` | Weekly + on integration | PCI DSS scope, OWASP checks, webhook validation |
 | `payments-reconciliation` | Daily/weekly/monthly | Verifies every settled transaction matches ledger and bank |
 | `payments-partner-health` | Weekly + before renewals | SLA tracking, contract milestones, negotiation readiness |
@@ -75,7 +86,12 @@ The Synthesis Agent checks for these before treating any output independently. T
 | Auth rate down + fraud rate down + FP up | Fraud model tightened too aggressively |
 | Auth rate drop on PSP A only + PSP A status degraded | PSP incident, route around it |
 | Success rate drop + recent deploy | Engineering incident, not payments-specific |
+| Success rate drop + checkout_config_changed | Merchant-side config drift, not engineering |
+| Success rate drop + checkout_extension_deployed | Payment customization function is the likely cause |
 | Checkout abandonment up + 3DS challenge rate up | 3DS overtriggering is killing conversion |
+| Method coverage gap (analytics) + checkout_config_changed (CLI) | Confirmed method disable — promote finding to high confidence |
+| Fraud rate up + payment_app_installed (fraud category) | New fraud tool recalibrating, not model drift |
+| Recon variance up + webhook_endpoint_changed | Payout webhook regression, not partner issue |
 | Cost per txn up + method mix shifting to cards | Mix shift problem, not fee negotiation |
 | Recon variance up + PSP settlement delays | PSP payout issue, escalate to partner health |
 
@@ -117,20 +133,31 @@ This isn't a ledger error, it's a partner SLA breach. PSP-B's contract specifies
 ## Repo structure
 
 ```
-skills/                          # Extracted SKILL.md files (readable markdown)
+skills/                                    # Extracted SKILL.md files (readable markdown)
+  payments-context/                        # Foundation — schema, signal taxonomy, oracles
   payments-incident-agent/
   payments-kpi-monitor/
   payments-fraud-analyst/
   payments-cost-optimizer/
   payments-checkout-optimizer/
+    SKILL.md
+    posthog-queries.md                     # Ready-to-run HogQL for funnel, coverage, 3DS, mix-shift
+  payments-storefront-audit/               # Shopify CLI-driven merchant-config audit
   payments-security-audit/
   payments-reconciliation/
   payments-partner-health/
   payments-regulatory-monitor/
   payments-synthesis/
-packages/                        # Original .skill zip files (importable)
-payments_agents_handbook.pdf     # Comprehensive PDF reference
+packages/                                  # Original .skill zip files (importable)
+payments_agents_handbook.pdf               # Comprehensive PDF reference
 ```
+
+## Analytics and storefront backends
+
+The ecosystem is analytics-backend-agnostic, but two integrations are documented end-to-end:
+
+- **PostHog** is the reference product-analytics backend for `payments-checkout-optimizer` and the false-positive proxy for `payments-fraud-analyst`. HogQL queries and PostHog Alert wiring live in `skills/payments-checkout-optimizer/posthog-queries.md`. `payments-synthesis` posts each briefing back to PostHog as an annotation so the conversion chart carries a timeline of "what we said" next to "what happened."
+- **Shopify CLI** powers `payments-storefront-audit`. It converts silent merchant-side config changes (method toggles, extensibility function deploys, app installs, webhook edits) into `checkout_config_changed` / `checkout_extension_deployed` / `payment_app_installed` / `webhook_endpoint_changed` signals — the storefront equivalent of an engineering deploy log, without which Synthesis's "success rate drop + recent change" correlation is one-eyed.
 
 ## Slack channels
 

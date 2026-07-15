@@ -1,6 +1,6 @@
 ---
 name: payments-checkout-optimizer
-description: "Analyzes checkout funnel performance, payment method coverage gaps, abandonment patterns, and pre-submission drop-off that Stripe and PSP data cannot see. Use this skill whenever you need to understand why users who reach the payment page don't complete, identify missing payment methods by market, correlate checkout latency with abandonment, or measure the gap between your reported success rate and your true effective conversion. Triggers on: 'checkout conversion analysis', 'why are users abandoning at payment', 'payment method coverage', 'checkout funnel report', 'BNPL coverage gaps', 'mobile checkout performance', 'what is our real conversion rate', 'checkout latency impact'. NOTE: requires product analytics data (Amplitude, Mixpanel, or internal event stream) — flag clearly if unavailable."
+description: "Analyzes checkout funnel performance, payment method coverage gaps, abandonment patterns, and pre-submission drop-off that Stripe and PSP data cannot see. Use this skill whenever you need to understand why users who reach the payment page don't complete, identify missing payment methods by market, correlate checkout latency with abandonment, or measure the gap between your reported success rate and your true effective conversion. Triggers on: 'checkout conversion analysis', 'why are users abandoning at payment', 'payment method coverage', 'checkout funnel report', 'BNPL coverage gaps', 'mobile checkout performance', 'what is our real conversion rate', 'checkout latency impact'. NOTE: requires product analytics data (PostHog, Amplitude, Mixpanel, or internal event stream) — flag clearly if unavailable. PostHog is the reference backend and ships with ready-to-run HogQL queries in posthog-queries.md."
 ---
 
 # Payments Checkout Optimizer
@@ -33,12 +33,33 @@ This agent requires product analytics event data. Without it, you are partially 
 
 | Data source | What it gives you | Can you run without it? |
 |-------------|------------------|------------------------|
-| Product analytics (Amplitude / Mixpanel / internal) | Funnel drop-off rates, time-on-page, method selection behavior | No — core dependency |
+| Product analytics (PostHog / Amplitude / Mixpanel / internal) | Funnel drop-off rates, time-on-page, method selection behavior | No — core dependency |
 | PSP transaction data | Submit-onward performance | Yes — shared with other agents |
 | APM (Datadog / Grafana) | True end-to-end latency including client-side | Partial — flag if missing |
 | Support tickets | Qualitative signals of checkout friction | Optional but valuable |
+| Shopify storefront config (via `payments-storefront-audit`) | Which methods are actually enabled per market — verifies coverage-gap findings | Optional but promotes confidence from `medium` → `high` |
 
 If product analytics data is unavailable, state this explicitly and provide only what PSP data can show. Do not estimate funnel metrics without data.
+
+### PostHog as the reference backend
+
+PostHog is the reference analytics backend for this skill. If your workspace uses PostHog, use the HogQL queries in **`posthog-queries.md`** (same directory) rather than reinventing them. They cover the full funnel, method-selection drop-off, latency-vs-abandonment, 3DS abandonment, and false-positive rebuy rate.
+
+Canonical event contract (should exist in your PostHog project — coordinate with `payments-context`):
+
+```
+checkout_viewed         { market, device, session_id }
+method_displayed        { methods: [...], preferred_method_available: bool }
+method_selected         { method, position_index }
+details_entered         { method, has_saved_card: bool }
+submit_clicked          { method, 3ds_required: bool }
+payment_succeeded       { psp, method, latency_ms }
+payment_failed          { psp, method, reason, decline_type }
+threeds_challenged      { psp, method, challenge_type }
+threeds_completed       { outcome: passed | failed | abandoned }
+```
+
+If your event names differ, map them in a preamble and note the mapping in every Finding's `evidence_refs`.
 
 ## What you analyze
 
