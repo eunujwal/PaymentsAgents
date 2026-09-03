@@ -75,7 +75,7 @@ Store all secrets in your runtime's secret manager. No agent reads secrets from 
 ### 4. First-run checklist
 1. Populate a static `markets.json` for every active market: `{ code, timezone, currency, preferred_methods, sca_regime, launch_date }`
 2. Wire Stripe Sigma (or warehouse mirror) so `payments-health` can compute dollar impact
-3. Confirm `charge.metadata.shopify_order_id` is populated on every Stripe charge — this is the join key `payments-reconciliation` depends on. If it's missing, fix that first; every downstream reconciliation finding will be `medium` confidence otherwise
+3. Confirm `charge.metadata.shopify_order_id` is populated on every Stripe charge — this is the primary join key `payments-reconciliation` depends on. If it's missing, fix that first; every downstream reconciliation finding will be `medium` confidence otherwise. If Claude commerce agents run upstream, also wire `charge.metadata.agent_session_id` and `intent_id` — see [Join keys and metadata contract](#join-keys-and-metadata-contract)
 4. Ensure PostHog is emitting the canonical event contract (see `skills/payments-checkout/SKILL.md`); map non-canonical event names via a CTE if needed
 5. Create the six Slack channels below
 6. Run each specialist agent once manually to confirm it produces valid Findings before enabling the schedule
@@ -132,9 +132,17 @@ Every specialist agent emits an array of Findings conforming to this shape. The 
   "recommended_action": "<one specific next step>",
   "action_owner":       "payments_eng | fraud_team | head_of_payments | merchant_admin | product",
   "evidence_refs":      ["<dashboard URL, query id, event id, or log line>"],
-  "carry_over_of":      "<finding_id of a previous finding if this is the same issue, else null>"
+  "carry_over_of":      "<finding_id of a previous finding if this is the same issue, else null>",
+  "commerce_agent_context": {
+    "session_id": "<upstream shopping/merchant agent session id, or null>",
+    "intent_id":  "<stable id issued at the shopping agent's checkout handoff and expected on Stripe PaymentIntent.metadata.intent_id, or null>",
+    "surface":    "shopping | merchant | none",
+    "vertical":   "retail | travel | telecom | entertainment | custom | none"
+  }
 }
 ```
+
+`commerce_agent_context` is optional. Set every field to `null` (or omit the object) if no upstream Claude commerce agent is running — every correlation and suppression rule works unchanged. See [Join keys and metadata contract](#join-keys-and-metadata-contract) for wiring.
 
 ### Signal taxonomy
 
@@ -157,6 +165,20 @@ Applied by Synthesis based on `finding_id` history:
 | Day 3 | No | Downgrade one severity level |
 | Day 5 | No | Auto-mute, move to weekly summary only |
 | Any | Yes | Respect ack — suppress until unsnoozed or a >2σ shift breaks it |
+
+## Join keys and metadata contract
+
+Every Finding anchors to the underlying commerce record through one of three keys, in order of preference. All three live in Stripe charge / PaymentIntent metadata — no separate store, no separate API call.
+
+| Key | Set by | Which agents use it | If missing |
+|---|---|---|---|
+| `charge.metadata.shopify_order_id` | Shopify Payments (native) | Reconciliation, Health (dollar attribution) | Order lookup falls back to amount+timestamp, downgrading Reconciliation findings to `medium` confidence |
+| `charge.metadata.agent_session_id` | Host, when a Claude commerce agent handed off checkout | Health, Radar Tuner, Checkout, Synthesis (agent-vs-non-agent slicing) | `commerce_agent_context.session_id` is `null`; every Finding is still emitted, just cannot be sliced "agent-driven vs. rest" |
+| `charge.metadata.intent_id` | Host, from the shopping agent's `checkout` handoff payload | Reconciliation (attribution audit), Checkout (funnel replay) | `commerce_agent_context.intent_id` is `null` |
+
+**If you run Claude commerce agents upstream** ([anthropics/commerce-agents](https://github.com/anthropics/commerce-agents)): the shopping agent's `checkout` tool hands off a cart to the host. The host is expected to forward `agent_session_id` (its session id) and `intent_id` (a stable id it mints for the handoff) into the resulting Stripe `PaymentIntent.metadata`. Once wired, PaymentsAgents' Findings carry `commerce_agent_context` populated and Synthesis can distinguish "auth-rate drop on agent-driven sessions" from "auth-rate drop overall" — a very different story for a Head of Payments.
+
+**If you don't:** leave `commerce_agent_context` out or set every field to `null`. Nothing else changes.
 
 ## Cross-agent correlation patterns
 
